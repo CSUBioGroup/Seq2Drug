@@ -4,7 +4,7 @@ Official implementation of Seq2Drug, a sequence-based molecule generation framew
 
 ## Seq2Drug
 <div align="center">  
-<img src="flowchart.png" width="800">
+<img src="img/flowchart.png" width="800">
 </div>
 
 ## Setup and dependencies
