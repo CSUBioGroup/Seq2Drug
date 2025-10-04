@@ -1,0 +1,17 @@
+python -m torch.distributed.launch --nproc_per_node=1 --master_port=11233 --use_env run_train.py \
+--diff_steps 2000 \
+--lr 0.0001 \
+--learning_steps 10000 \
+--save_interval 1000 \
+--seed 102 \
+--noise_schedule sqrt \
+--seq_len 128 \
+--hidden_dim 128 \
+--bsz 2048 \
+--microbatch 32 \
+--dataset crossdocked_pocket10 \
+--data_dir ../datasets/crossdocked_pocket10 \
+--schedule_sampler lossaware \
+--notes data_crossdocked_pocket10 \
+--molbart_name combined_large \
+--fine_tune 0 \
