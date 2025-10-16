@@ -3,7 +3,7 @@ import os
 import argparse
 import time
 sys.path.append('.')
-os.environ["CUDA_VISIBLE_DEVICES"] = '1'
+os.environ["CUDA_VISIBLE_DEVICES"] = '0'
 
 if __name__ == '__main__':
 
@@ -31,7 +31,8 @@ if __name__ == '__main__':
     parser.add_argument('--notes', type=str, default='-', help='as training notes or specifical args')
     parser.add_argument('--app', type=str, default='', help='other input args')
 
-    parser.add_argument('--molbart_name', type=str, default='', help='name of molbart model')
+    parser.add_argument('--molbart_path', type=str, default='', help='path of molbart model')
+    parser.add_argument('--mol_dim', type=int, default=1024, help='dimension of molbert embedding')
     parser.add_argument('--fine_tune', type=int, default=1, help='Whether to fine-tune the molbart model')
 
     args = parser.parse_args()
@@ -42,38 +43,17 @@ if __name__ == '__main__':
     # dname = os.path.dirname(dname)
     os.chdir(dname)
 
-    folder_name = "models/seq2mol/"
+    folder_name = "models/seq2drug/"
 
     if int(os.environ['LOCAL_RANK']) == 0:
         if not os.path.isdir(folder_name):
             os.mkdir(folder_name)
 
-    Model_FILE = f"seq2mol_tokenloss_{args.dataset}_{args.molbart_name}_f{args.fine_tune}_l{args.seq_len}_h{args.hidden_dim}_lr{args.lr}" \
-                f"_t{args.diff_steps}_{args.noise_schedule}_{args.schedule_sampler}" \
-                f"_seed{args.seed}"
+    Model_FILE = f"seq2drug"
     if args.notes:
         args.notes += time.strftime("%Y%m%d-%H:%M:%S")
         Model_FILE = Model_FILE + f'_{args.notes}'
     Model_FILE = os.path.join(folder_name, Model_FILE)
-
-    if args.molbart_name == 'augment':
-        molbart_path = "models/molbart/pre-trained/augment/step=1000000.ckpt"
-        mol_dim = 512
-    
-    elif args.molbart_name == 'combined':
-        molbart_path = "models/molbart/pre-trained/combined/step=1000000.ckpt"
-        mol_dim = 512
-    
-    elif args.molbart_name == 'combined_large':
-        molbart_path = "models/molbart/pre-trained/combined-large/step=1000000.ckpt"
-        mol_dim = 1024
-    
-    elif args.molbart_name == 'fine_tuned50':
-        molbart_path = "models/molbart/fined-tuned/uspto_50/last.ckpt"
-        mol_dim = 512
-
-    else:
-        raise ValueError("You must specify a model")
 
     if int(os.environ['LOCAL_RANK']) == 0:
         if not os.path.isdir(Model_FILE):
@@ -83,8 +63,8 @@ if __name__ == '__main__':
                   f"TOKENIZERS_PARALLELISM=false " \
                   f"python train.py " \
                   f"--checkpoint_path {Model_FILE} " \
-                  f"--molbart_path {molbart_path} " \
-                  f"--mol_dim {mol_dim} " \
+                  f"--molbart_path {args.molbart_path} " \
+                  f"--mol_dim {args.mol_dim} " \
                   f"--fine_tune {args.fine_tune} " \
                   f"--dataset {args.dataset} --data_dir {args.data_dir} " \
                   f"--lr {args.lr} " \

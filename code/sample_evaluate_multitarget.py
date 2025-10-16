@@ -1,5 +1,6 @@
 import json
 import time
+import random
 import pickle
 import argparse
 import torch
@@ -12,7 +13,6 @@ from rdkit.Chem import AllChem
 from rdkit.Chem.Descriptors import MolLogP, qed
 from tqdm.auto import tqdm
 
-from evaluation.docking import *
 from evaluation.docking_2 import *
 from evaluation.sascorer import *
 from evaluation.score_func import *
@@ -31,7 +31,7 @@ from basic_utils import (
     args_to_dict
 )
 import os
-# os.environ["CUDA_VISIBLE_DEVICES"] = '1'
+os.environ["CUDA_VISIBLE_DEVICES"] = '0'
 
 
 class MolReconsError(Exception):
@@ -49,39 +49,10 @@ def get_prot_inputs(sequences, prot_feats):
     return sequence_repr
 
 
-def _extract_into_tensor(arr, timesteps, broadcast_shape):
-    """
-    Extract values from a 1-D numpy array for a batch of indices.
-
-    :param arr: the 1-D numpy array.
-    :param timesteps: a tensor of indices into the array to extract.
-    :param broadcast_shape: a larger shape of K dimensions with the batch
-                            dimension equal to the length of timesteps.
-    :return: a tensor of shape [batch_size, 1, ...] where the shape has K dims.
-    """
-    res = th.from_numpy(arr).to(device=timesteps.device)[timesteps].float()
-    while len(res.shape) < len(broadcast_shape):
-        res = res[..., None]
-    return res.expand(broadcast_shape)
-
-
-def mean_flat(tensor):
-    """
-    Take the mean over all non-batch dimensions.
-    """
-    return tensor.mean(dim=list(range(1, len(tensor.shape))))
-
-
-def load_training_config():
-    
-    with open(json_file, 'r') as f:
-        return json.load(f)
-
-
 def create_argparser():
-    defaults = dict(model_path='', molbart_checkpoint='', step=2000, out_dir='', top_p=-1)
+    defaults = dict(model_path='', model_checkpoint='', mol_model_checkpoint='', step=2000, out_dir='', top_p=-1)
     decode_defaults = dict(split='test', clamp_step=0, seed2=105, clip_denoised=False)
-    defaults.update(load_training_config())
+    defaults.update(load_defaults_config())
     defaults.update(decode_defaults)
     parser = argparse.ArgumentParser()
     add_dict_to_argparser(parser, defaults)
@@ -113,36 +84,35 @@ def smiles2mol(smiles):
     return embedded_mol
 
 
-# json_file = 'models/seq2mol/seq2mol_decodeloss_crossdocked_pocket10_combined_large_f1_l128_h128_lr0.0001_t2000_sqrt_lossaware_seed102_data_crossdocked_pocket1020240625-11:08:36/training_args.json'
-# args = create_argparser().parse_args()
-# model_n = 'crossdocked_decodeloss2000'
-# mol_model_path = args.checkpoint_path + '/mol_model_002000.pth'
-# model_path = args.checkpoint_path + '/ema_0.9999_002000.pt'
+def evaluate(mol, receptor_file):
+    _, sa = compute_sa_score(mol)
+    _qed = qed(mol)
+    logP = MolLogP(mol)
+    Lipinski = obey_lipinski(mol)
+    vina_score = calculate_qvina2_score(receptor_file, mol, sdf_dir)[0]
+    return sa, _qed, logP, Lipinski, vina_score
 
-# json_file = 'models/seq2mol/seq2mol_mse-tT-tokenloss_crossdocked_pocket10_combined_large_f0_l128_h128_lr0.0001_t2000_sqrt_lossaware_seed102_data_crossdocked_pocket1020240705-13:23:48/training_args.json'
-# args = create_argparser().parse_args()
-# model_n = 'crossdocked_mse-tT-tokenloss4000'
-# mol_model_path = args.checkpoint_path + '/mol_model_004000.pth'
-# model_path = args.checkpoint_path + '/ema_0.9999_004000.pt'
 
-json_file = 'models/seq2mol/seq2mol_tokenloss_crossdocked_pocket10_combined_large_f0_l128_h128_lr0.0001_t2000_sqrt_lossaware_seed102_data_crossdocked_pocket1020240710-21:19:07/training_args.json'
 args = create_argparser().parse_args()
-model_n = 'crossdocked_tokenloss2000'
-mol_model_path = args.checkpoint_path + '/mol_model_002000.pth'
-model_path = args.checkpoint_path + '/ema_0.9999_002000.pt'
-
 set_seed(args.seed)
 dist_util.setup_dist()
 
-# mol_model = MolBartModel(model_path=args.molbart_path, device=dist_util.dev())  # 原始模型
-mol_model = load_mol_model(mol_model_path, device=dist_util.dev())  # 保存模型
+config_path = os.path.join(args.model_path, "training_args.json")
+with open(config_path, 'rb', ) as f:
+    training_args = json.load(f)
+training_args['batch_size'] = args.batch_size
+args.__dict__.update(training_args)
+
+mol_model_path = os.path.join(args.model_path, args.mol_model_checkpoint)
+mol_model = load_mol_model(mol_model_path, device=dist_util.dev())
 
 model, diffusion = create_model_and_diffusion(
     **args_to_dict(args, load_defaults_config().keys())
 )
 
+diff_model_path = os.path.join(args.model_path, args.model_checkpoint)
 model.load_state_dict(
-    dist_util.load_state_dict(model_path, map_location="cpu")
+    dist_util.load_state_dict(diff_model_path, map_location="cpu")
 )
 
 schedule_sampler = create_named_schedule_sampler(args.schedule_sampler, diffusion)
@@ -153,7 +123,7 @@ print(f'### The parameter count is {pytorch_total_params}')
 model.eval().requires_grad_(False).to(dist_util.dev())
 set_seed(123)
 
-args.data_dir = '../datasets/crossdocked_pocket10'
+args.data_dir = '../datasets/multi_target'
 data_test = load_data(
     batch_size=1,
     data_args=args,
@@ -168,7 +138,6 @@ with open(args.data_dir + '/test_prot_feats_128.pkl', 'rb') as f:
     prot_feats = pickle.load(f)
 
 max_mol_len = 84
-# index = -64
 
 time_list = []
 
@@ -186,50 +155,63 @@ vina_score_list = []
 smile_list = []
 mol_list = []
 
-high_affinity = 0
 results = []
 protein_files = []
 
-protein_root = '../../PMDM/data/test_data/test_pdbqt'
 sampling_alg = 'beam'
-res_path = './results_random/crossdocked/' + '_'.join([model_n, sampling_alg, 'forward', 'random-1-200']) + '/'
+res_path = './results/multitarget/'
 sdf_dir = res_path + 'gen_sdf'
-data_path = '../datasets/crossdocked_pocket10'
+data_path = args.data_dir + '/test_data'
 
-with open(os.path.join(data_path, 'test_vina_crossdock.pkl'), 'rb') as f:
-    test_vina_score_list = pickle.load(f)
+# with open(os.path.join(data_path, 'test_vina_crossdock.pkl'), 'rb') as f:
+#     test_vina_score_list = pickle.load(f)
 
-split_by_name = torch.load(os.path.join(data_path, 'split_by_name.pt'))
-test_pairs = split_by_name['test']
+test_pairs = ['MEK1/mTOR', 'PARP1/BRD4', 'CDK7/PRMT5', 'CDK9/PRMT5', 'CDK12/PRMT5', 'BRD4/ERBB2', 'BRD4/FGFR3', 'BRD4/TOP1', 'ERBB2/TOP1', 'TOP1/FGFR3']
+
+id_dic = {
+    'MEK1': '7m0y',
+    'mTOR': '3fap',
+    'PARP1': '7kk4',
+    'BRD4': '3mxf',
+    'CDK7': '6xd3',
+    'CDK9': '6z45',
+    'CDK12': '7nxk',
+    'PRMT5': '6rlq',
+    'ERBB2': '7pcd',
+    'FGFR3': '6lvm',
+    'TOP1': '1tl8'
+}
+
 
 for i, batch in enumerate(tqdm(data_test)):
 
-    receptor = test_pairs[i][0]
-    ligand = test_pairs[i][1]
-    pdb_name = os.path.basename(receptor).split('.')[0]
-    receptor_file = Path(os.path.join(protein_root, pdb_name+'.pdbqt'))
-    r_sdf_file = os.path.join(data_path, ligand)
-    rmol = Chem.SDMolSupplier(r_sdf_file, sanitize=False)[0]
-    r_smiles = mol2smiles(rmol)
+    t1, t2 = test_pairs[i].split('/')
+    id1, id2 = id_dic[t1], id_dic[t2]
 
-    _, r_sa = compute_sa_score(rmol)
-    r_qed = qed(rmol)
-    r_logP = MolLogP(rmol)
-    r_Lipinski = obey_lipinski(rmol)
-    r_vina_score = test_vina_score_list[i]
-    # r_vina_score = calculate_qvina2_score(receptor_file, rmol, sdf_dir)[0]
+    receptor_file1 = Path(os.path.join(data_path, id1 + '_pocket.pdbqt'))
+    r_sdf_file1 = os.path.join(data_path, id1 + '_ligand.sdf')
+    r_mol1 = Chem.SDMolSupplier(r_sdf_file1, sanitize=False)[0]
+    r_smiles1 = mol2smiles(r_mol1)
 
-    print("Reference SA score:", r_sa)
-    print("Reference QED score:", r_qed)
-    print("Reference logP:", r_logP)
-    print("Reference Lipinski:", r_Lipinski)
-    print("Reference Vina score:", r_vina_score)
+    receptor_file2 = Path(os.path.join(data_path, id2 + '_pocket.pdbqt'))
+    r_sdf_file2 = os.path.join(data_path, id2 + '_ligand.sdf')
+    r_mol2 = Chem.SDMolSupplier(r_sdf_file2, sanitize=False)[0]
+    r_smiles2 = mol2smiles(r_mol2)
 
-    r_sa_list.append(r_sa)
-    r_qed_list.append(r_qed)
-    r_logP_list.append(r_logP)
-    r_Linpinski_list.append(r_Lipinski)
-    r_vina_score_list.append(r_vina_score)
+    r_sa1, r_qed1, r_logP1, r_Lipinski1, r_vina_score1 = evaluate(r_mol1, receptor_file1)
+    r_sa2, r_qed2, r_logP2, r_Lipinski2, r_vina_score2 = evaluate(r_mol2, receptor_file2)
+
+    print("Reference SA score:", r_sa1, r_sa2)
+    print("Reference QED score:", r_qed1, r_qed2)
+    print("Reference logP:", r_logP1, r_logP2)
+    print("Reference Lipinski:", r_Lipinski1, r_Lipinski2)
+    print("Reference Vina score:", r_vina_score1, r_vina_score2)
+
+    r_sa_list.append([r_sa1, r_sa2])
+    r_qed_list.append([r_qed1, r_qed2])
+    r_logP_list.append([r_logP1, r_logP2])
+    r_Linpinski_list.append([r_Lipinski1, r_Lipinski2])
+    r_vina_score_list.append([r_vina_score1, r_vina_score2])
 
     sequences = batch['target_sequence']
     prot_encodes = get_prot_inputs(sequences, prot_feats)
@@ -281,9 +263,7 @@ for i, batch in enumerate(tqdm(data_test)):
             gap=step_gap
         )
 
-        import random
         index = random.randint(1, 200)
-
         sample = samples[-index]
         unmask_len = int(sum(input_mask_ori[0] == 0))
         mol_diff = sample[:, unmask_len:, :]
@@ -314,7 +294,6 @@ for i, batch in enumerate(tqdm(data_test)):
                     print('Small molecules')
                     raise MolReconsError()
                 
-                
                 gmol = smiles2mol(g_smiles)
                 _, g_sa = compute_sa_score(gmol)
                 print("Generate SA score:", g_sa)
@@ -329,34 +308,35 @@ for i, batch in enumerate(tqdm(data_test)):
                 print("Generate Lipinski score:", g_Lipinski)
 
                 gen_index = 100-num_samples
-                g_vina_score = calculate_qvina2_score(receptor_file, gmol, sdf_dir, index=gen_index, r_mol=rmol)[0]
-                if g_vina_score > -2:
+                g_vina_score1 = calculate_qvina2_score(receptor_file1, gmol, sdf_dir, index=gen_index, r_mol=r_mol1)[0]
+                if g_vina_score1 > -2:
                     raise MolReconsError()
-                print("Generate Vina score:", g_vina_score)
-                print("Reference Vina score:", r_vina_score)
-                
-                g_high_affinity = False
-                if g_vina_score < r_vina_score:
-                    high_affinity += 1.0
-                    g_high_affinity = True
+                print("Generate Vina score:", g_vina_score1)
+                print("Reference Vina score:", r_vina_score1)
 
-                gen_file_name = pdb_name + '_gen' + str(gen_index) + '.sdf'
+                g_vina_score2 = calculate_qvina2_score(receptor_file2, gmol, sdf_dir, index=gen_index, r_mol=r_mol2)[0]
+                if g_vina_score2 > -2:
+                    raise MolReconsError()
+                print("Generate Vina score:", g_vina_score2)
+                print("Reference Vina score:", r_vina_score2)
+
+                name = id1 + '_' + id2
+                gen_file_name = name + '_gen' + str(gen_index) + '.sdf'
                 save_sdf(gmol, sdf_dir, gen_file_name)
 
-                gen_file_smi = pdb_name + '_gen' + str(gen_index) + '.smiles'
+                gen_file_smi = name + '_gen' + str(gen_index) + '.smiles'
                 save_smiles(g_smiles, sdf_dir, gen_file_smi)
                 
                 sa_list.append(g_sa)
                 qed_list.append(g_qed)
                 logP_list.append(g_logP)
                 Lipinski_list.append(g_Lipinski)
-                vina_score_list.append(g_vina_score)
+                vina_score_list.append([g_vina_score1, g_vina_score2])
 
                 metrics = {'SA':g_sa,'QED':g_qed,'logP':g_logP,'Lipinski':g_Lipinski,
-                        'vina':g_vina_score,'high_affinity':g_high_affinity}
+                        'vina':[g_vina_score1, g_vina_score2]}
                 result = {'smile': g_smiles,
-                        'protein_file': receptor,
-                        'ligand_file': ligand,
+                        'pair': test_pairs[i],
                         'generated_ligand_sdf': gen_file_name,
                         'generated_mol': gmol,
                         'metric_result':metrics
@@ -367,7 +347,7 @@ for i, batch in enumerate(tqdm(data_test)):
                 smile_list.append(g_smiles)
                 num_samples -= 1
 
-                print('Successfully generate molecule for {}, remining {} samples generated'.format(pdb_name, num_samples))
+                print('Successfully generate molecule for {}, remining {} samples generated'.format(name, num_samples))
             
             except:
                 print('Invalid, continue')
@@ -376,7 +356,7 @@ for i, batch in enumerate(tqdm(data_test)):
                 break
     
     time_list.append(time.time() - t_start)
-    print(pdb_name + 'takes {} seconds'.format(time.time() - t_start))
+    print(name + 'takes {} seconds'.format(time.time() - t_start))
 
 times_arr = torch.tensor(time_list)
 print(f"Time per pocket: {times_arr.mean():.3f} \pm "
@@ -401,8 +381,7 @@ all_results = {
     'Lipinski_list': Lipinski_list,
     'vina_score_list': vina_score_list,
     'smile_list': smile_list,
-    'mol_list': mol_list,
-    'high_affinity': high_affinity
+    'mol_list': mol_list
 }
 all_results_save_path = res_path + 'all_results.pkl'
 print('Saving all results to: %s' % all_results_save_path)
@@ -416,13 +395,12 @@ print('reference mean sa: {}, num: {}'.format(np.mean(r_sa_list), len(r_sa_list)
 print('reference mean qed: {}, num: {}'.format(np.mean(r_qed_list), len(r_qed_list)))
 print('reference mean logP: {}, num: {}'.format(np.mean(r_logP_list), len(r_logP_list)))
 print('reference mean Lipinski: {}, num: {}'.format(np.mean(r_Linpinski_list), len(r_Linpinski_list)))
-print('reference reference mean vina: {}, num: {}'.format(np.mean(r_vina_score_list), len(r_vina_score_list)))
+print('reference reference mean vina: {}, num: {}'.format(np.mean(r_vina_score_list, axis=0), len(r_vina_score_list)))
 
 print('mean sa: {}, num: {}'.format(np.mean(sa_list), len(sa_list)))
 print('mean qed: {}, num: {}'.format(np.mean(qed_list), len(qed_list)))
 print('mean logP: {}, num: {}'.format(np.mean(logP_list), len(logP_list)))
 print('mean Lipinski {}, num: {}'.format(np.mean(Lipinski_list), len(Lipinski_list)))
-print('mean vina: {}, num: {}'.format(np.mean(vina_score_list), len(vina_score_list)))
+print('mean vina: {}, num: {}'.format(np.mean(vina_score_list, axis=0), len(vina_score_list)))
 
-print('high affinity:%d' % high_affinity)
 print('diversity:%f' % calculate_diversity(mol_list)) 

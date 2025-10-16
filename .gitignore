@@ -1,1 +1,5 @@
 __pycache__/
+datasets/
+code/models/
+code/results/
+code/wandb/

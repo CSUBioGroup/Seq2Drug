@@ -38,8 +38,6 @@ def load_data(
 
 def get_input_data(data_args, split='train'):
 
-    print('#'*30, '\nLoading dataset {} from {}...'.format(data_args.dataset, data_args.data_dir))
-
     if split == 'train':
         print('### Loading form the TRAIN set...')
         path = f'{data_args.data_dir}/train_interactions.csv'

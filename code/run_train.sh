@@ -12,6 +12,7 @@ python -m torch.distributed.launch --nproc_per_node=1 --master_port=11233 --use_
 --dataset crossdocked_pocket10 \
 --data_dir ../datasets/crossdocked_pocket10 \
 --schedule_sampler lossaware \
---notes data_crossdocked_pocket10 \
---molbart_name combined_large \
+--notes crossdocked \
+--molbart_path models/molbart/model.ckpt \
+--mol_dim 1024 \
 --fine_tune 0 \
